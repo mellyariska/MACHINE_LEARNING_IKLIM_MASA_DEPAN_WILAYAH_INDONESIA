@@ -1,130 +1,129 @@
+##############################################
+# DASHBOARD DSS IKLIM – SUMATERA SELATAN
+# Tanpa Upload Data – Data Langsung Dibaca
+##############################################
+
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.express as px
-from datetime import datetime, timedelta
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
 
+# -------------------------------------------------
+# CONFIGURASI HALAMAN
+# -------------------------------------------------
 st.set_page_config(
-    page_title="DSS Iklim Sumatera Selatan",
+    page_title="Dashboard DSS Iklim – Sumatera Selatan",
+    page_icon="🌦️",
     layout="wide"
 )
 
-# ============================================================
-# 1. DATA DIBUAT LANGSUNG DI DALAM KODE (TANPA FILE EXCEL)
-# ============================================================
+# -------------------------------------------------
+# LOAD DATA OTOMATIS
+# -------------------------------------------------
+@st.cache_data
+def load_data():
+    df = pd.read_excel("SUMSEL.xlsx")
+    df['tanggal'] = pd.to_datetime(df['tanggal'])
+    return df
 
-# membuat 30 hari data simulasi Sumatera Selatan
-tanggal = [datetime.today() - timedelta(days=i) for i in range(30)]
-tanggal.reverse()
+df = load_data()
 
-np.random.seed(42)
+# -------------------------------------------------
+# HEADER
+# -------------------------------------------------
+st.markdown("""
+# 🌦️ Dashboard Analisis & Prediksi Cuaca — **Sumatera Selatan**
+Dashboard ini menyajikan analisis data iklim (suhu, kelembaban, angin, curah hujan)  
+serta model *machine learning* untuk memprediksi kategori cuaca.
+""")
 
-data = {
-    "tanggal": tanggal,
-    "suhu": np.random.uniform(24, 33, 30),          # suhu 24–33 °C
-    "kelembaban": np.random.uniform(65, 95, 30),    # kelembaban 65–95%
-    "angin": np.random.uniform(1, 12, 30)           # angin 1–12 m/s
-}
+# -------------------------------------------------
+# DATA SUMMARY
+# -------------------------------------------------
+st.subheader("📊 Ringkasan Data Iklim")
 
-df = pd.DataFrame(data)
+col1, col2, col3, col4 = st.columns(4)
 
-# ============================================================
-# 2. HEADER
-# ============================================================
-st.title("🌦️ Dashboard Sistem Pendukung Keputusan Iklim")
-st.subheader("Wilayah Sumatera Selatan – Machine Learning Climate DSS")
-
-st.markdown("""Dashboard ini menampilkan visualisasi iklim dan hasil prediksi 
-berbasis Machine Learning untuk wilayah Sumatera Selatan **tanpa upload data**.""")
-
-st.divider()
-
-# ============================================================
-# 3. METRIC IKLIM
-# ============================================================
-col1, col2, col3 = st.columns(3)
-
-col1.metric("Rata-rata Suhu (°C)", round(df["suhu"].mean(), 2))
-col2.metric("Rata-rata Kelembaban (%)", round(df["kelembaban"].mean(), 2))
-col3.metric("Rata-rata Kecepatan Angin (m/s)", round(df["angin"].mean(), 2))
+col1.metric("Rata-rata Suhu (°C)", f"{df['suhu'].mean():.2f}")
+col2.metric("Rata-rata Kelembaban (%)", f"{df['kelembaban'].mean():.2f}")
+col3.metric("Rata-rata Angin (m/s)", f"{df['angin'].mean():.2f}")
+col4.metric("Total Curah Hujan", f"{df['curah_hujan'].sum():.2f} mm")
 
 st.divider()
 
-# ============================================================
-# 4. TREND VISUALIZATION
-# ============================================================
-st.subheader("📈 Tren Parameter Iklim Harian")
+# -------------------------------------------------
+# VISUALISASI DATA
+# -------------------------------------------------
+st.header("📈 Visualisasi Data Iklim")
 
-fig = px.line(
-    df,
-    x="tanggal",
-    y=["suhu", "kelembaban", "angin"],
-    labels={"value": "Nilai", "variable": "Parameter"},
-    title="Tren Suhu, Kelembaban, dan Angin"
-)
-st.plotly_chart(fig, use_container_width=True)
+tab1, tab2, tab3, tab4 = st.tabs(["Suhu", "Kelembaban", "Angin", "Curah Hujan"])
 
+with tab1:
+    fig = px.line(df, x='tanggal', y='suhu', title="Tren Suhu Harian")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
+    fig = px.line(df, x='tanggal', y='kelembaban', title="Tren Kelembaban Harian")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab3:
+    fig = px.line(df, x='tanggal', y='angin', title="Tren Kecepatan Angin Harian")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab4:
+    fig = px.bar(df, x='tanggal', y='curah_hujan', title="Curah Hujan Harian")
+    st.plotly_chart(fig, use_container_width=True)
+
+# -------------------------------------------------
+# MACHINE LEARNING PREDIKSI CUACA
+# -------------------------------------------------
+st.header("🤖 Prediksi Cuaca Menggunakan Random Forest")
+
+st.markdown("""
+Model berikut dikembangkan untuk memprediksi cuaca (Hujan Lebat, Hujan Ringan, Tidak Hujan)  
+berdasarkan variabel iklim.
+""")
+
+# Pastikan ada kolom label cuaca
+if "cuaca" not in df.columns:
+    st.error("Kolom 'cuaca' tidak ditemukan. Tambahkan kategori cuaca pada data.")
+else:
+    X = df[['suhu', 'kelembaban', 'angin', 'curah_hujan']]
+    y = df['cuaca']
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    model = RandomForestClassifier(n_estimators=200, random_state=42)
+    model.fit(X_train, y_train)
+
+    # Tampilkan hasil evaluasi
+    y_pred = model.predict(X_test)
+
+    st.subheader("📘 Hasil Evaluasi Model")
+    st.text(classification_report(y_test, y_pred))
+
+    # Prediksi manual
+    st.subheader("🧪 Coba Prediksi Cuaca")
+
+    cs, ck, ca, ch = st.columns(4)
+    suhu = cs.number_input("Suhu (°C)", value=28.0)
+    kelembaban = ck.number_input("Kelembaban (%)", value=75.0)
+    angin = ca.number_input("Angin (m/s)", value=3.0)
+    curah = ch.number_input("Curah Hujan (mm)", value=0.0)
+
+    if st.button("Prediksi Cuaca"):
+        pred = model.predict([[suhu, kelembaban, angin, curah]])[0]
+        st.success(f"🌤️ Prediksi Cuaca: **{pred}**")
+
+# -------------------------------------------------
+# FOOTER
+# -------------------------------------------------
 st.divider()
-
-# ============================================================
-# 5. HEATMAP KORELASI
-# ============================================================
-st.subheader("📊 Korelasi Antar Variabel Iklim")
-
-cor = df[["suhu", "kelembaban", "angin"]].corr()
-fig_cor = px.imshow(cor, text_auto=True, title="Heatmap Korelasi Variabel Iklim")
-st.plotly_chart(fig_cor, use_container_width=True)
-
-st.divider()
-
-# ============================================================
-# 6. DISTRIBUSI PARAMETER
-# ============================================================
-st.subheader("📉 Distribusi Parameter Iklim")
-
-c1, c2, c3 = st.columns(3)
-
-with c1:
-    st.write("Distribusi Suhu")
-    st.plotly_chart(px.histogram(df, x="suhu", nbins=20, title="Histogram Suhu"), use_container_width=True)
-
-with c2:
-    st.write("Distribusi Kelembaban")
-    st.plotly_chart(px.histogram(df, x="kelembaban", nbins=20, title="Histogram Kelembaban"), use_container_width=True)
-
-with c3:
-    st.write("Distribusi Kecepatan Angin")
-    st.plotly_chart(px.histogram(df, x="angin", nbins=20, title="Histogram Angin"), use_container_width=True)
-
-st.divider()
-
-# ============================================================
-# 7. SIMULASI PREDIKSI CUACA (DUMMY ML)
-# ============================================================
-st.subheader("🔮 Prediksi Cuaca (Simulasi Machine Learning)")
-
-def simulasi_prediksi(suhu, kelembaban, angin):
-    if suhu > 30 and kelembaban < 70:
-        return "Tidak Hujan"
-    elif kelembaban > 85:
-        return "Hujan Lebat"
-    else:
-        return "Hujan Ringan"
-
-colA, colB, colC = st.columns(3)
-
-inp_suhu = colA.number_input("Suhu (°C)", 10, 40, 29)
-inp_kel = colB.number_input("Kelembaban (%)", 40, 100, 80)
-inp_angin = colC.number_input("Kecepatan Angin (m/s)", 0, 30, 5)
-
-if st.button("Prediksi Cuaca"):
-    hasil = simulasi_prediksi(inp_suhu, inp_kel, inp_angin)
-    st.success(f"🌤️ **Prediksi Cuaca: {hasil}**")
-
-st.divider()
-
-# ============================================================
-# 8. TABEL DATA
-# ============================================================
-st.subheader("📋 Data Iklim Sumatera Selatan")
-st.dataframe(df, use_container_width=True)
+st.markdown("""
+### © 2025 – Dashboard Iklim Sumatera Selatan  
+Dikembangkan menggunakan **Streamlit & Machine Learning**
+""")
