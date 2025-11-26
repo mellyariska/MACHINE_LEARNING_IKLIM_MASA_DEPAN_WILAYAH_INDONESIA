@@ -45,11 +45,31 @@ curah_hujan
 if uploaded_file is not None:
     df = pd.read_excel(uploaded_file)
 
-    # Pastikan kolom tanggal benar
-    if "tanggal" in df.columns:
-        df["tanggal"] = pd.to_datetime(df["tanggal"])
+    # ---------------------------------------------
+    # NORMALISASI KOLOM AGAR BEBAS ERROR
+    # ---------------------------------------------
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace(r"[^a-zA-Z0-9_]", "", regex=True)
+    )
+
+    # CEK KOLUM WAJIB
+    required_cols = ["tanggal", "suhu", "kelembaban", "angin", "curah_hujan"]
+    missing = [c for c in required_cols if c not in df.columns]
+
+    if missing:
+        st.error(f"❌ Kolom berikut tidak ditemukan dalam file Excel Anda: {missing}")
+        st.info("Harap periksa kembali nama kolom pada file Excel Anda.")
+        st.stop()
+
+    # Pastikan tanggal format datetime
+    df["tanggal"] = pd.to_datetime(df["tanggal"])
 
     st.success("File berhasil dimuat!")
+
 else:
     st.warning("Silakan unggah file Excel terlebih dahulu.")
     st.stop()
@@ -58,7 +78,6 @@ else:
 # 4. TAMPILKAN DATA
 # ============================================================
 st.subheader("📊 Data Iklim — Sumatera Selatan")
-
 st.dataframe(df, height=300)
 
 # ============================================================
@@ -77,19 +96,15 @@ col4.metric("Total Curah Hujan", round(df["curah_hujan"].sum(), 2))
 # ============================================================
 st.subheader("📉 Visualisasi Tren Iklim")
 
-# Line chart suhu
 fig_temp = px.line(df, x="tanggal", y="suhu", title="Perubahan Suhu Harian")
 st.plotly_chart(fig_temp, use_container_width=True)
 
-# Line chart kelembaban
 fig_hum = px.line(df, x="tanggal", y="kelembaban", title="Perubahan Kelembaban Harian")
 st.plotly_chart(fig_hum, use_container_width=True)
 
-# Line chart angin
 fig_wind = px.line(df, x="tanggal", y="angin", title="Perubahan Kecepatan Angin")
 st.plotly_chart(fig_wind, use_container_width=True)
 
-# Bar chart curah hujan
 fig_rain = px.bar(df, x="tanggal", y="curah_hujan", title="Curah Hujan Harian")
 st.plotly_chart(fig_rain, use_container_width=True)
 
@@ -98,7 +113,6 @@ st.plotly_chart(fig_rain, use_container_width=True)
 # ============================================================
 st.subheader("🤖 Prediksi Kondisi Cuaca dengan Random Forest")
 
-# Label otomatis berdasarkan curah hujan
 df["label"] = pd.cut(
     df["curah_hujan"],
     bins=[-1, 0, 20, 200],
@@ -117,11 +131,9 @@ model.fit(X_train, y_train)
 
 predictions = model.predict(X_test)
 
-# Tampilkan hasil model
 st.text("Laporan Akurasi Model:")
 st.code(classification_report(y_test, predictions))
 
-# Prediksi seluruh dataset
 df["prediksi_cuaca"] = model.predict(features)
 
 st.subheader("📥 Hasil Prediksi Cuaca")
