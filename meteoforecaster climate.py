@@ -1,180 +1,183 @@
+# app_streamlit_dss_sumsel.py
 import streamlit as st
 import pandas as pd
 import numpy as np
+import io
 import plotly.express as px
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, r2_score
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
 
-# Judul Dashboard
-st.title("🌦️ Prediksi Iklim di Wilayah Indonesia dengan Machine Learning")
-st.write("Upload data harian untuk melatih model dan prediksi iklim 10–50 tahun ke depan.")
+# ---------- CONFIG ----------
+st.set_page_config(page_title="DSS Iklim - Sumatera Selatan", layout="wide")
+st.title("🌦️ Decision Support System Iklim — Sumatera Selatan")
+st.markdown(
+    "Dashboard prediksi & analisis iklim. Data akan dimuat dari file Excel `SUMSEL.xlsx` "
+    "yang telah Anda unggah."
+)
 
-# Upload File
-uploaded_file = st.file_uploader("Unggah file Excel (.xlsx)", type=["xlsx"])
+LOCAL_EXCEL_PATH = "SUMSEL.xlsx"
 
-if uploaded_file:
-    # ================================
-    # 0. BACA DATA & HANDLE DUPLIKAT KECEPATAN ANGIN
-    # ================================
-    df = pd.read_excel(uploaded_file, sheet_name='Data Harian - Table')
+# ---------- DSS helper functions ----------
+def klasifikasi_cuaca(ch, matahari):
+    if ch > 20:
+        return "Hujan"
+    elif ch > 5:
+        return "Berawan"
+    elif matahari > 4:
+        return "Cerah"
+    else:
+        return "Berawan"
 
-    # jika ada kolom duplikat seperti kecepatan_angin, ambil satu saja
-    df = df.loc[:, ~df.columns.duplicated()]
+def risiko_kekeringan_score(ch, matahari):
+    ch_clamped = np.clip(ch, 0, 200)
+    matahari_clamped = np.clip(matahari, 0, 16)
+    score = (1 - (ch_clamped / 200)) * 0.7 + (matahari_clamped / 16) * 0.3
+    return float(np.clip(score, 0, 1))
 
-    # mapping kecepatan_angin → FF_X
-    if "kecepatan_angin" in df.columns:
-        df = df.rename(columns={"kecepatan_angin": "FF_X"})
+def risiko_kekeringan_label(score, thresholds=(0.6, 0.3)):
+    high, med = thresholds
+    if high < med:
+        high, med = med, high
+    if score >= high:
+        return "Risiko Tinggi"
+    elif score >= med:
+        return "Risiko Sedang"
+    else:
+        return "Risiko Rendah"
 
-    # tanggal & time features
-    df['Tanggal'] = pd.to_datetime(df['Tanggal'], dayfirst=True)
-    df['Tahun'] = df['Tanggal'].dt.year
-    df['Bulan'] = df['Tanggal'].dt.month
+def hujan_ekstrem_flag(ch, threshold=50):
+    return int(ch > threshold)
 
-    # ================================
-    # 1. LIST VARIABEL YANG DIPAKAI
-    # ================================
-    possible_vars = [
-        "Tn", "Tx", "Tavg", "kelembaban",
-        "curah_hujan", "matahari",
-        "FF_X", "DDD_X"
-    ]
+def compute_weather_index(df):
+    eps = 1e-6
+    r = df['curah_hujan'].astype(float).values
+    r_norm = (r - r.min()) / (r.max() - r.min() + eps)
 
-    available_vars = [v for v in possible_vars if v in df.columns]
+    t = df['Tavg'].astype(float).values
+    comfy_low, comfy_high = 24, 28
+    t_dist = np.maximum(0, np.maximum(comfy_low - t, t - comfy_high))
+    t_norm = (t_dist - t_dist.min()) / (t_dist.max() - t_dist.min() + eps)
 
-    # ================================
-    # 1B. MAPPING AKADEMIS (LABEL)
-    # ================================
-    akademis_label = {
-        "Tn": "Suhu Minimum (°C)",
-        "Tx": "Suhu Maksimum (°C)",
-        "Tavg": "Suhu Rata-rata (°C)",
-        "kelembaban": "Kelembaban Udara (%)",
-        "curah_hujan": "Curah Hujan (mm)",
-        "matahari": "Durasi Penyinaran Matahari (jam)",
-        "FF_X": "Kecepatan Angin Maksimum (m/s)",
-        "DDD_X": "Arah Angin saat Kecepatan Maksimum (°)"
-    }
+    h = df['kelembaban'].astype(float).values
+    hum_dist = np.maximum(0, np.maximum(40 - h, h - 70))
+    h_norm = (hum_dist - hum_dist.min()) / (hum_dist.max() - hum_dist.min() + eps)
 
-    # ================================
-    # 2. AGREGASI BULANAN
-    # ================================
-    agg_dict = {v: 'mean' for v in available_vars}
-    if "curah_hujan" in available_vars:
-        agg_dict["curah_hujan"] = "sum"
+    w = df['kecepatan_angin'].astype(float).values
+    w_norm = (w - w.min()) / (w.max() - w.min() + eps)
 
-    cuaca_df = df[['Tahun', 'Bulan'] + available_vars]
-    monthly_df = cuaca_df.groupby(['Tahun', 'Bulan']).agg(agg_dict).reset_index()
+    composite = 0.35 * r_norm + 0.25 * t_norm + 0.2 * h_norm + 0.2 * w_norm
+    return np.clip(composite, 0, 1)
 
-    st.subheader("📊 Data Bulanan")
-    st.dataframe(monthly_df)
+# ---------- Data loading ----------
+@st.cache_data(show_spinner=False)
+def load_data(local_path=LOCAL_EXCEL_PATH):
+    try:
+        df = pd.read_excel(local_path, parse_dates=['Tanggal'])
+        st.sidebar.success(f"Loaded local Excel: {local_path}")
+    except Exception:
+        st.sidebar.error("File SUMSEL.xlsx tidak ditemukan!")
+        st.stop()
 
-    # ================================
-    # 3. TRAIN MODEL (SEMUA VARIABEL)
-    # ================================
-    X = monthly_df[['Tahun', 'Bulan']]
-    models = {}
-    metrics = {}
+    df['Tanggal'] = pd.to_datetime(df['Tanggal'], errors='coerce')
 
-    for var in available_vars:
-        y = monthly_df[var]
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
+    needed = ['curah_hujan', 'Tn', 'Tx', 'Tavg', 'kelembaban', 'matahari', 'kecepatan_angin']
+    for col in needed:
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-        model = RandomForestRegressor(n_estimators=200, random_state=42)
-        model.fit(X_train, y_train)
-        pred = model.predict(X_test)
+    return df.sort_values('Tanggal').reset_index(drop=True)
 
-        models[var] = model
-        metrics[var] = {
-            "rmse": np.sqrt(mean_squared_error(y_test, pred)),
-            "r2": r2_score(y_test, pred)
-        }
+# Load dataset
+data = load_data()
 
-    # ================================
-    # 4. TAMPILKAN EVALUASI MODEL
-    # ================================
-    st.subheader("📈 Evaluasi Model Machine Learning")
-    for var, m in metrics.items():
-        st.write(
-            f"**{akademis_label[var]}** → RMSE: {m['rmse']:.3f} | R²: {m['r2']:.3f}"
-        )
+# Sidebar
+st.sidebar.header("⚙️ Pengaturan")
+extreme_threshold = st.sidebar.number_input("Ambang Hujan Ekstrem (mm/hari)", value=50, min_value=1)
+risk_high = st.sidebar.slider("Ambang Risiko Tinggi", 0.0, 1.0, 0.6, 0.01)
+risk_med = st.sidebar.slider("Ambang Risiko Sedang", 0.0, 1.0, 0.3, 0.01)
+ma_window = st.sidebar.slider("Moving average window (hari)", 1, 60, 7)
 
-    # ================================
-    # 5. PREDIKSI MANUAL
-    # ================================
-    st.subheader("🔮 Prediksi Manual (1 Bulan)")
-    tahun_input = st.number_input("Masukkan Tahun Prediksi", min_value=2025, max_value=2100, value=2035)
-    bulan_input = st.selectbox("Pilih Bulan", list(range(1, 13)))
+# Filter Data
+st.sidebar.header("📅 Filter data")
+min_date = data['Tanggal'].min().date()
+max_date = data['Tanggal'].max().date()
+date_range = st.sidebar.date_input("Rentang tanggal", (min_date, max_date))
 
-    input_data = pd.DataFrame([[tahun_input, bulan_input]], columns=["Tahun", "Bulan"])
+region = None
+if 'Wilayah' in data.columns:
+    regions = ['All'] + sorted(data['Wilayah'].unique())
+    region = st.sidebar.selectbox("Pilih Wilayah", regions)
 
-    st.write("### Hasil Prediksi:")
-    for var in available_vars:
-        pred_val = models[var].predict(input_data)[0]
-        st.success(f"{akademis_label[var]} bulan {bulan_input}/{tahun_input}: **{pred_val:.2f}**")
+start_date, end_date = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+mask = (data['Tanggal'] >= start_date) & (data['Tanggal'] <= end_date)
 
-    # ================================
-    # 6. PREDIKSI 2025–2075
-    # ================================
-    st.subheader("📆 Prediksi Otomatis 2025–2075")
-    future_years = list(range(2025, 2076))
-    future_months = list(range(1, 13))
+if region and region != "All":
+    mask &= (data['Wilayah'] == region)
 
-    future_data = pd.DataFrame(
-        [(year, month) for year in future_years for month in future_months],
-        columns=['Tahun', 'Bulan']
+df = data.loc[mask].copy()
+if df.empty:
+    st.warning("Tidak ada data pada filter ini — menampilkan seluruh dataset.")
+    df = data.copy()
+
+# Derived fields
+df['Prediksi Cuaca'] = df.apply(lambda r: klasifikasi_cuaca(r['curah_hujan'], r['matahari']), axis=1)
+df['Hujan Ekstrem'] = df['curah_hujan'].apply(lambda x: "Ya" if x > extreme_threshold else "Tidak")
+df['extreme_flag'] = df['curah_hujan'].apply(lambda x: hujan_ekstrem_flag(x, extreme_threshold))
+df['RiskScore'] = df.apply(lambda r: risiko_kekeringan_score(r['curah_hujan'], r['matahari']), axis=1)
+df['RiskLabel'] = df['RiskScore'].apply(lambda s: risiko_kekeringan_label(s, (risk_high, risk_med)))
+df['WeatherIndex'] = compute_weather_index(df)
+df['Year'] = df['Tanggal'].dt.year
+df['Month'] = df['Tanggal'].dt.month
+
+# ---------------- 6. Trend Bulanan ----------------
+st.markdown("---")
+st.header("6. Tren Kualitas Iklim Bulanan/Tahunan")
+m1, m2 = st.columns(2)
+
+with m1:
+    years = sorted(df['Year'].unique())
+    fig_multi = go.Figure()
+
+    for y in years:
+        tmp = df[df['Year'] == y].copy()
+        monthly = tmp.groupby(tmp['Tanggal'].dt.month)['curah_hujan'].mean().reset_index()
+        fig_multi.add_trace(go.Scatter(
+            x=monthly['Tanggal'],
+            y=monthly['curah_hujan'],
+            mode='lines+markers',
+            name=str(y)
+        ))
+
+    fig_multi.update_layout(
+        title="Monthly Average Rainfall by Year",
+        xaxis_title="Month",
+        yaxis_title="Rain (mm)"
     )
+    st.plotly_chart(fig_multi, use_container_width=True)
 
-    for var in available_vars:
-        future_data[f"Pred_{var}"] = models[var].predict(future_data[['Tahun', 'Bulan']])
+with m2:
+    df['Rain_MA'] = df['curah_hujan'].rolling(window=ma_window).mean()
+    fig_ma = px.line(df, x='Tanggal', y=['curah_hujan', 'Rain_MA'],
+                     title=f"Moving Average Rainfall (window={ma_window})")
+    st.plotly_chart(fig_ma, use_container_width=True)
 
-    st.dataframe(future_data.head(12))
+# ---------------- Export data ----------------
+st.markdown("---")
+with st.expander("📁 Lihat & Unduh Data"):
+    st.dataframe(df)
 
-    # ================================
-    # 7. GRAFIK HISTORIS & PREDIKSI
-    # ================================
-    monthly_df['Sumber'] = 'Data Historis'
-    future_data['Sumber'] = 'Prediksi'
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        df.to_excel(writer, sheet_name='Hasil_DSS', index=False)
 
-    merge_list = []
-    for var in available_vars:
-        hist = monthly_df[['Tahun', 'Bulan', var, 'Sumber']].rename(columns={var: 'Nilai'})
-        hist['Variabel'] = akademis_label[var]
+    buffer.seek(0)
 
-        fut = future_data[['Tahun', 'Bulan', f"Pred_{var}", 'Sumber']].rename(columns={f"Pred_{var}": 'Nilai'})
-        fut['Variabel'] = akademis_label[var]
-
-        merge_list.append(pd.concat([hist, fut]))
-
-    future_data_merged = pd.concat(merge_list)
-    future_data_merged['Tanggal'] = pd.to_datetime(
-        future_data_merged['Tahun'].astype(str) + "-" +
-        future_data_merged['Bulan'].astype(str) + "-01"
-    )
-
-    st.subheader("📈 Grafik Tren Variabel Cuaca (Historis vs Prediksi)")
-    selected_var = st.selectbox("Pilih Variabel Cuaca", [akademis_label[v] for v in available_vars])
-
-    fig = px.line(
-        future_data_merged[future_data_merged['Variabel'] == selected_var],
-        x='Tanggal',
-        y='Nilai',
-        color='Sumber',
-        title=f"Tren {selected_var} Bulanan",
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ================================
-    # 8. DOWNLOAD CSV
-    # ================================
-    st.subheader("💾 Simpan Hasil Prediksi")
-    csv = future_data.to_csv(index=False).encode('utf-8')
     st.download_button(
-        label="📥 Download CSV Prediksi 2025–2075",
-        data=csv,
-        file_name='prediksi_cuaca_multi_variabel_2025_2075.csv',
-        mime='text/csv'
+        "Unduh Excel Hasil Analisis",
+        buffer.getvalue(),
+        "hasil_dss_iklim_sumsel.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+st.caption("Minimal kolom: Tanggal, curah_hujan, Tn, Tx, Tavg, kelembaban, matahari, kecepatan_angin.")
