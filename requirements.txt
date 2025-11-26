@@ -1,13 +1,11 @@
 streamlit
 pandas
-matplotlib
-seaborn
-openpyxl
-plotly
 numpy
 scikit-learn
-pandas==2.1.4
-XlsxWriter==3.2.0
+plotly
+XlsxWriter
+openpyxl
+
 
 
 
