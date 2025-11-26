@@ -3,3 +3,8 @@ pandas
 matplotlib
 seaborn
 openpyxl
+plotly
+numpy
+scikit-learn
+
+
